@@ -27,9 +27,10 @@ def _ensure(import_name: str, pip_name: str):
         )
 
 
-# setuptools must come first — it provides the `distutils` shim that
-# undetected-chromedriver needs on Python 3.12+ (where distutils was removed).
+# setuptools must be installed AND imported first — importing it activates
+# the distutils shim required by undetected-chromedriver on Python 3.12+.
 _ensure("setuptools", "setuptools")
+import setuptools  # noqa: E402
 
 _ensure("undetected_chromedriver", "undetected-chromedriver")
 _ensure("selenium", "selenium")
