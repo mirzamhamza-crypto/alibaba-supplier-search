@@ -1,96 +1,90 @@
 """
-analyzer.py - Analyzes headlines and produces trading signals with confidence scores.
-
-For each headline:
-  1. Detect matching sectors via keyword scan
-  2. Map sectors to stock tickers
-  3. Calculate sentiment (Bullish / Bearish / Neutral)
-  4. Assign a confidence level (High / Medium / Low)
-
-Also produces an aggregate summary:
-  - Top impacted sector
-  - Top 5 bullish stocks
-  - Top 5 bearish stocks
+analyzer.py
+Processes headlines into signals, then enriches each with technicals + scoring.
 """
 
 from collections import Counter
-from mapper import match_sectors, detect_sentiment
+from mapper  import find_sectors, get_stocks_for_sectors, get_sentiment
+from scorer  import get_technicals, score_signal
 
 
-def _confidence(keyword_count, signal, pos_count, neg_count):
-    """
-    Confidence heuristic:
-      High   → multiple keywords AND strong sentiment (2+ sentiment words)
-      Medium → at least one keyword AND some sentiment
-      Low    → everything else (weak or no match)
-    """
-    sentiment_strength = pos_count + neg_count
-
-    if keyword_count >= 2 and sentiment_strength >= 2 and signal != "Neutral":
+def _confidence(kw_count: int, strength: int) -> str:
+    if kw_count >= 2 and strength >= 2:
         return "High"
-    elif keyword_count >= 1 and signal != "Neutral":
+    elif kw_count >= 1 and strength >= 1:
         return "Medium"
-    else:
-        return "Low"
+    return "Low"
 
 
-def analyze_headline(item):
-    """
-    Analyze a single headline dict and return a signal dict.
-    Input:  {source, headline, link, published}
-    Output: {headline, source, sectors, stocks, signal, confidence}
-    """
-    headline = item["headline"]
-    source = item["source"]
+def analyze_headlines(headlines: list[dict]) -> list[dict]:
+    """Detect sectors, sentiment, then fetch technicals and score each signal."""
+    print("Analyzing headlines...\n")
+    signals = []
 
-    sectors, stocks, keyword_count = match_sectors(headline)
-    signal, pos_count, neg_count = detect_sentiment(headline)
-    conf = _confidence(keyword_count, signal, pos_count, neg_count)
+    for item in headlines:
+        headline = item["headline"]
+        sectors, kw_count = find_sectors(headline)
+        if not sectors:
+            continue
 
-    return {
-        "headline": headline,
-        "source": source,
-        "sectors": sectors,
-        "stocks": stocks,
-        "signal": signal,
-        "confidence": conf,
-    }
+        stocks     = get_stocks_for_sectors(sectors)
+        sentiment, strength = get_sentiment(headline)
+        confidence = _confidence(kw_count, strength)
+
+        # Fetch technicals for the first (most representative) stock
+        lead_stock = stocks[0] if stocks else None
+        tech       = get_technicals(lead_stock) if lead_stock else {"error": "No stock"}
+
+        score, action, commentary = score_signal(sentiment, confidence, tech)
+
+        signals.append({
+            "headline":    headline,
+            "source":      item["source"],
+            "pub_date":    item.get("pub_date", "Unknown date"),
+            "age_label":   item.get("age_label", ""),
+            "sectors":     sectors,
+            "stocks":      stocks,
+            "signal":      sentiment,
+            "confidence":  confidence,
+            "technicals":  tech,
+            "score":       score,
+            "action":      action,
+            "commentary":  commentary,
+        })
+        status = f"✔ {lead_stock}: {action} ({score}/10)" if lead_stock else "✔ no stock"
+        print(f"  {status}  |  {headline[:55]}...")
+
+    print(f"\n  →  {len(signals)} signals scored\n")
+    return signals
 
 
-def analyze_all(headlines):
-    """
-    Run analysis on every headline and return (signals, summary).
-    signals: list of signal dicts
-    summary: dict with top_sector, bullish_stocks, bearish_stocks
-    """
-    signals = [analyze_headline(item) for item in headlines]
-
-    # ── Aggregate counters ───────────────────────────────────────────────
-    sector_counter = Counter()
+def build_summary(signals: list[dict]) -> dict:
+    sector_counter  = Counter()
     bullish_counter = Counter()
     bearish_counter = Counter()
+    buy_list        = []
 
     for sig in signals:
         for sector in sig["sectors"]:
             sector_counter[sector] += 1
 
-        # Count each stock once per headline (no duplicates within a signal)
+        unique = list(dict.fromkeys(sig["stocks"]))
         if sig["signal"] == "Bullish":
-            for stock in sig["stocks"]:
-                bullish_counter[stock] += 1
+            bullish_counter.update(unique)
         elif sig["signal"] == "Bearish":
-            for stock in sig["stocks"]:
-                bearish_counter[stock] += 1
+            bearish_counter.update(unique)
 
-    # ── Build summary ────────────────────────────────────────────────────
-    top_sector = sector_counter.most_common(1)[0][0] if sector_counter else "None"
-    top_bullish = [s for s, _ in bullish_counter.most_common(5)]
-    top_bearish = [s for s, _ in bearish_counter.most_common(5)]
+        if sig["action"] == "BUY":
+            buy_list.append((sig["stocks"][0], sig["score"], sig["headline"]))
 
-    summary = {
-        "top_sector": top_sector,
-        "bullish_stocks": top_bullish,
-        "bearish_stocks": top_bearish,
+    # Sort BUY list by score descending, top 3
+    buy_list.sort(key=lambda x: x[1], reverse=True)
+
+    return {
+        "total_signals":    len(signals),
+        "top_sector":       sector_counter.most_common(1)[0] if sector_counter else ("N/A", 0),
+        "sector_breakdown": dict(sector_counter.most_common()),
+        "top_bullish":      bullish_counter.most_common(5),
+        "top_bearish":      bearish_counter.most_common(5),
+        "top_buys":         buy_list[:3],
     }
-
-    return signals, summary

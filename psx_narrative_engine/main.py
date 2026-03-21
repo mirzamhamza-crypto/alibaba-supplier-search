@@ -1,101 +1,141 @@
 """
-main.py - PSX Narrative Engine entry point.
+main.py  —  PSX Narrative Engine v3
+Turns news into scored, dated, technically-backed stock signals.
 
-Workflow:
-  1. Fetch news headlines from Pakistani business RSS feeds
-  2. Analyze each headline for sector, stock, and sentiment signals
-  3. Print a formatted report to the console
-  4. Save the full report to psx_signals_YYYYMMDD_HHMMSS.txt
+Usage:  python main.py
+Output: Console report + psx_signals_YYYYMMDD_HHMMSS.txt
 """
 
-import os
-import sys
 from datetime import datetime
+from news_fetcher import get_all_headlines
+from analyzer    import analyze_headlines, build_summary
 
-# Ensure the package directory is on the path so imports work
-# when running as `python main.py` from inside the folder.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+DIVIDER = "=" * 65
+BLOCK   = "-" * 65
 
-from news_fetcher import fetch_news
-from analyzer import analyze_all
-
-
-SEPARATOR = "-" * 50
+ACTION_ICONS = {"BUY": "✅ BUY", "HOLD": "🟡 HOLD", "AVOID": "🔴 AVOID"}
+SIGNAL_ICONS = {"Bullish": "📈 BULLISH", "Bearish": "📉 BEARISH", "Neutral": "➖ NEUTRAL"}
+CONF_ICONS   = {"High": "🔴 HIGH", "Medium": "🟡 MEDIUM", "Low": "⚪ LOW"}
 
 
-def format_signal(sig):
-    """Format a single signal dict into a readable block."""
-    sectors_str = ", ".join(sig["sectors"]) if sig["sectors"] else "N/A"
-    stocks_str = ", ".join(sig["stocks"]) if sig["stocks"] else "N/A"
+def format_signal(sig: dict) -> str:
+    tech    = sig["technicals"]
+    has_data = not tech.get("error")
 
-    return (
-        f"{SEPARATOR}\n"
-        f"Headline   : {sig['headline']}\n"
-        f"Source     : {sig['source']}\n"
-        f"Sector(s)  : {sectors_str}\n"
-        f"Stocks     : {stocks_str}\n"
-        f"Signal     : {sig['signal'].upper()}\n"
-        f"Confidence : {sig['confidence'].upper()}\n"
-        f"{SEPARATOR}"
+    sectors = ", ".join(sig["sectors"])
+    stocks  = ", ".join(sig["stocks"])
+    action  = ACTION_ICONS.get(sig["action"], sig["action"])
+    signal  = SIGNAL_ICONS.get(sig["signal"], sig["signal"])
+    conf    = CONF_ICONS.get(sig["confidence"], sig["confidence"])
+    age     = f"  ({sig['age_label']})" if sig["age_label"] else ""
+
+    lines = [
+        BLOCK,
+        f"Headline   : {sig['headline']}",
+        f"Published  : {sig['pub_date']}{age}",
+        f"Source     : {sig['source']}",
+        f"Sector(s)  : {sectors}",
+        f"Stocks     : {stocks}",
+        f"Signal     : {signal}",
+        f"Confidence : {conf}",
+    ]
+
+    if has_data:
+        t = tech
+        lines += [
+            f"",
+            f"── Technicals ({t['ticker']}) ──────────────────────────",
+            f"  Price      : PKR {t['price']}  |  SMA-20: PKR {t['sma20']}  ({t['price_vs_sma']} SMA)",
+            f"  RSI-14     : {t['rsi']}",
+            f"  Volume     : {t['last_volume']} today  |  10-day avg: {t['avg_volume_10']}  |  Change: {t['vol_diff']} ({t['vol_pct']})",
+        ]
+    else:
+        lines.append(f"  Technicals : Unavailable ({tech.get('error', '—')})")
+
+    lines += [
+        f"",
+        f"  Score      : {sig['score']} / 10",
+        f"  Action     : {action}",
+        f"",
+        f"  💬 {sig['commentary']}",
+        BLOCK,
+    ]
+    return "\n".join(lines)
+
+
+def format_summary(summary: dict) -> str:
+    top_sector  = summary["top_sector"]
+    breakdown   = " | ".join(f"{k}: {v}" for k, v in summary["sector_breakdown"].items())
+    bullish_str = ", ".join(f"{s}({c})" for s, c in summary["top_bullish"]) or "None"
+    bearish_str = ", ".join(f"{s}({c})" for s, c in summary["top_bearish"]) or "None"
+
+    lines = [
+        "",
+        DIVIDER,
+        "  📊  FINAL MARKET SUMMARY",
+        DIVIDER,
+        f"  Signals analysed   : {summary['total_signals']}",
+        f"  Top impacted sector: {top_sector[0]} ({top_sector[1]} mentions)",
+        f"  Sector breakdown   : {breakdown}",
+        "",
+        f"  📈 Top bullish stocks : {bullish_str}",
+        f"  📉 Top bearish stocks : {bearish_str}",
+        "",
+        "  ── TOP BUY RECOMMENDATIONS TODAY ──────────────────",
+    ]
+
+    if summary["top_buys"]:
+        for i, (stock, score, headline) in enumerate(summary["top_buys"], 1):
+            short_hl = headline[:50] + "..." if len(headline) > 50 else headline
+            lines.append(f"  {i}. {stock:<8} Score: {score}/10  |  \"{short_hl}\"")
+    else:
+        lines.append("  No strong BUY signals today.")
+
+    lines += ["", DIVIDER]
+    return "\n".join(lines)
+
+
+def save_report(signals, summary) -> str:
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"psx_signals_{ts}.txt"
+
+    header = (
+        f"{DIVIDER}\n"
+        f"  PSX NARRATIVE ENGINE v3  —  Signal Report\n"
+        f"  Generated : {datetime.now().strftime('%A, %d %B %Y  %H:%M:%S')}\n"
+        f"{DIVIDER}\n\n"
     )
 
+    body = "\n\n".join(format_signal(s) for s in signals)
+    report = header + body + "\n" + format_summary(summary) + "\n"
 
-def format_summary(summary):
-    """Format the aggregate summary section."""
-    bullish = ", ".join(summary["bullish_stocks"]) if summary["bullish_stocks"] else "None"
-    bearish = ", ".join(summary["bearish_stocks"]) if summary["bearish_stocks"] else "None"
-
-    return (
-        f"\n{'=' * 50}\n"
-        f"             MARKET SIGNAL SUMMARY\n"
-        f"{'=' * 50}\n"
-        f"Top impacted sector : {summary['top_sector']}\n"
-        f"Top bullish stocks  : {bullish}\n"
-        f"Top bearish stocks  : {bearish}\n"
-        f"{'=' * 50}\n"
-    )
-
-
-def save_report(report_text):
-    """Save the full report to a timestamped text file and return the path."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"psx_signals_{timestamp}.txt"
-    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(report_text)
-
-    return filepath
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(report)
+    return filename
 
 
 def main():
-    # ── Step 1: Fetch headlines ──────────────────────────────────────────
-    print("Fetching news...")
-    headlines = fetch_news()
-    print(f"  Total headlines: {len(headlines)}\n")
+    print(f"\n{DIVIDER}")
+    print("  PSX NARRATIVE ENGINE v3")
+    print("  News  +  Technicals  →  Stock Signals")
+    print(f"{DIVIDER}\n")
 
-    # ── Step 2: Analyze ──────────────────────────────────────────────────
-    print("Analyzing headlines...\n")
-    signals, summary = analyze_all(headlines)
+    headlines = get_all_headlines()
+    signals   = analyze_headlines(headlines)
 
-    # ── Step 3: Build report ─────────────────────────────────────────────
-    report_lines = []
-    report_lines.append("PSX NARRATIVE ENGINE - Signal Report")
-    report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    if not signals:
+        print("  No signals found. Check connection or try again later.")
+        return
 
     for sig in signals:
-        block = format_signal(sig)
-        print(block)
-        report_lines.append(block)
+        print(format_signal(sig))
+        print()
 
-    summary_block = format_summary(summary)
-    print(summary_block)
-    report_lines.append(summary_block)
+    summary = build_summary(signals)
+    print(format_summary(summary))
 
-    # ── Step 4: Save to file ─────────────────────────────────────────────
-    full_report = "\n".join(report_lines)
-    filepath = save_report(full_report)
-    print(f"Report saved to: {filepath}")
+    filename = save_report(signals, summary)
+    print(f"\n  ✔  Report saved → {filename}\n")
 
 
 if __name__ == "__main__":
