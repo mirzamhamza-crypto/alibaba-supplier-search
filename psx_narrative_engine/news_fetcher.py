@@ -1,115 +1,124 @@
 """
-news_fetcher.py - Fetches and parses business news from Pakistani RSS feeds.
-
-Sources:
-  - Dawn Business & Finance
-  - Business Recorder
-
-Falls back to hardcoded sample headlines if feeds are unreachable.
+news_fetcher.py
+Fetches RSS headlines from Dawn and Business Recorder.
+- Parses and displays publish date per headline
+- Filters out headlines older than MAX_AGE_DAYS (default 7)
+- Flags headlines as FRESH (today/yesterday) or OLDER
 """
 
-import xml.etree.ElementTree as ET
 import urllib.request
-import urllib.error
-from datetime import datetime
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 
+MAX_AGE_DAYS = 7   # discard anything older than this
 
-# RSS feed URLs for Pakistani business news
-FEEDS = {
-    "Dawn": "https://www.dawn.com/feeds/business-finance",
+RSS_FEEDS = {
+    "Dawn Business":     "https://www.dawn.com/feeds/business-finance",
     "Business Recorder": "https://www.brecorder.com/feeds/rss",
 }
 
-# Timeout in seconds for each feed request
-REQUEST_TIMEOUT = 10
+SAMPLE_HEADLINES = [
+    {"source": "Sample", "headline": "sbp holds policy rate steady at 17 percent",                    "link": "", "published": "Fri, 21 Mar 2026 08:00:00 +0500", "pub_date": "2026-03-21", "age_label": "Today"},
+    {"source": "Sample", "headline": "oil prices surge amid global supply concerns",                   "link": "", "published": "Fri, 21 Mar 2026 07:30:00 +0500", "pub_date": "2026-03-21", "age_label": "Today"},
+    {"source": "Sample", "headline": "cement sector reports record growth in exports",                  "link": "", "published": "Thu, 20 Mar 2026 09:00:00 +0500", "pub_date": "2026-03-20", "age_label": "Yesterday"},
+    {"source": "Sample", "headline": "fertilizer subsidy approved by federal cabinet",                 "link": "", "published": "Thu, 20 Mar 2026 10:00:00 +0500", "pub_date": "2026-03-20", "age_label": "Yesterday"},
+    {"source": "Sample", "headline": "circular debt in power sector reaches new high",                 "link": "", "published": "Wed, 19 Mar 2026 08:45:00 +0500", "pub_date": "2026-03-19", "age_label": "2 days ago"},
+    {"source": "Sample", "headline": "bank profits decline amid rising tax burden",                    "link": "", "published": "Wed, 19 Mar 2026 11:00:00 +0500", "pub_date": "2026-03-19", "age_label": "2 days ago"},
+    {"source": "Sample", "headline": "crude oil production increases in balochistan",                  "link": "", "published": "Tue, 18 Mar 2026 09:00:00 +0500", "pub_date": "2026-03-18", "age_label": "3 days ago"},
+    {"source": "Sample", "headline": "construction boom drives demand for cement and steel",           "link": "", "published": "Mon, 17 Mar 2026 08:00:00 +0500", "pub_date": "2026-03-17", "age_label": "4 days ago"},
+    {"source": "Sample", "headline": "electricity tariff hike sparks public outcry",                  "link": "", "published": "Sun, 16 Mar 2026 10:00:00 +0500", "pub_date": "2026-03-16", "age_label": "5 days ago"},
+    {"source": "Sample", "headline": "engro posts record profit in quarterly earnings",                "link": "", "published": "Sat, 15 Mar 2026 09:00:00 +0500", "pub_date": "2026-03-15", "age_label": "6 days ago"},
+]
 
 
-def _parse_rss(xml_text, source):
-    """Parse RSS XML and return a list of headline dicts."""
+def _parse_date(pub_str: str) -> tuple[datetime | None, str, str]:
+    """
+    Parse RSS pubDate string into a datetime object.
+    Returns: (datetime_obj, formatted_date_str, age_label)
+    """
+    if not pub_str:
+        return None, "Unknown date", "Unknown"
+
+    try:
+        dt = parsedate_to_datetime(pub_str)
+        dt_utc = dt.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        delta   = now_utc - dt_utc
+
+        formatted = dt.strftime("%d %b %Y, %I:%M %p")
+
+        if delta.days == 0:
+            age_label = "Today"
+        elif delta.days == 1:
+            age_label = "Yesterday"
+        elif delta.days <= MAX_AGE_DAYS:
+            age_label = f"{delta.days} days ago"
+        else:
+            age_label = f"STALE ({delta.days}d old)"
+
+        return dt_utc, formatted, age_label
+
+    except Exception:
+        return None, pub_str[:30], "Unknown"
+
+
+def fetch_feed(name: str, url: str) -> list[dict]:
+    """Fetch, parse, and age-filter a single RSS feed."""
     headlines = []
-    root = ET.fromstring(xml_text)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            xml_data = resp.read()
 
-    # RSS feeds keep items under <channel><item>
-    for item in root.iter("item"):
-        title_el = item.find("title")
-        link_el = item.find("link")
-        pub_el = item.find("pubDate")
+        root  = ET.fromstring(xml_data)
+        items = root.findall(".//item")
+        now   = datetime.now(timezone.utc)
+        skipped = 0
 
-        headline = title_el.text.strip() if title_el is not None and title_el.text else ""
-        link = link_el.text.strip() if link_el is not None and link_el.text else ""
-        published = pub_el.text.strip() if pub_el is not None and pub_el.text else ""
+        for item in items[:30]:
+            title   = item.findtext("title",   "").strip()
+            link    = item.findtext("link",    "").strip()
+            pub_raw = item.findtext("pubDate", "").strip()
 
-        if headline:
+            if not title:
+                continue
+
+            dt_obj, formatted, age_label = _parse_date(pub_raw)
+
+            # Skip headlines older than MAX_AGE_DAYS
+            if dt_obj and (now - dt_obj).days > MAX_AGE_DAYS:
+                skipped += 1
+                continue
+
             headlines.append({
-                "source": source,
-                "headline": headline.lower(),  # normalize to lowercase
-                "link": link,
-                "published": published,
+                "source":    name,
+                "headline":  title.lower(),
+                "link":      link,
+                "published": pub_raw,
+                "pub_date":  formatted,
+                "age_label": age_label,
             })
+
+        print(f"  ✔  {name}: {len(headlines)} headlines (skipped {skipped} older than {MAX_AGE_DAYS}d)")
+
+    except Exception as e:
+        print(f"  ✘  {name}: feed unavailable ({e})")
 
     return headlines
 
 
-def _fetch_feed(url, source):
-    """Download a single RSS feed and return parsed headlines."""
-    req = urllib.request.Request(url, headers={"User-Agent": "PSX-Narrative-Engine/1.0"})
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        xml_text = resp.read().decode("utf-8", errors="replace")
-    return _parse_rss(xml_text, source)
-
-
-def _sample_headlines():
-    """Return 10 hardcoded sample headlines for offline / fallback use."""
-    samples = [
-        {"source": "Dawn", "headline": "oil prices surge amid global supply concerns",
-         "link": "#", "published": "2025-01-15"},
-        {"source": "Dawn", "headline": "sbp holds policy rate steady at 17 percent",
-         "link": "#", "published": "2025-01-14"},
-        {"source": "Business Recorder", "headline": "cement sector reports record growth in exports",
-         "link": "#", "published": "2025-01-14"},
-        {"source": "Dawn", "headline": "fertilizer subsidy approved by federal cabinet",
-         "link": "#", "published": "2025-01-13"},
-        {"source": "Business Recorder", "headline": "circular debt in power sector reaches new high",
-         "link": "#", "published": "2025-01-13"},
-        {"source": "Dawn", "headline": "bank profits decline amid rising tax burden",
-         "link": "#", "published": "2025-01-12"},
-        {"source": "Business Recorder", "headline": "crude oil production increases in balochistan",
-         "link": "#", "published": "2025-01-12"},
-        {"source": "Dawn", "headline": "construction boom drives demand for cement and steel",
-         "link": "#", "published": "2025-01-11"},
-        {"source": "Business Recorder", "headline": "electricity tariff hike sparks public outcry",
-         "link": "#", "published": "2025-01-11"},
-        {"source": "Dawn", "headline": "engro posts record profit in quarterly earnings",
-         "link": "#", "published": "2025-01-10"},
-    ]
-    return samples
-
-
-def fetch_news():
-    """
-    Fetch latest business headlines from all configured RSS feeds.
-    Returns a list of dicts: {source, headline, link, published}.
-    Falls back to sample headlines if all feeds fail.
-    """
+def get_all_headlines() -> list[dict]:
+    """Fetch from all feeds. Fall back to sample data if both fail."""
+    print("Fetching news...\n")
     all_headlines = []
 
-    for source, url in FEEDS.items():
-        try:
-            headlines = _fetch_feed(url, source)
-            all_headlines.extend(headlines)
-            print(f"  [OK] {source}: {len(headlines)} headlines fetched")
-        except (urllib.error.URLError, urllib.error.HTTPError, ET.ParseError, Exception) as e:
-            print(f"  [WARN] {source} feed failed: {e}")
+    for name, url in RSS_FEEDS.items():
+        all_headlines.extend(fetch_feed(name, url))
 
-    # Fallback to sample data if no headlines were fetched
     if not all_headlines:
-        print("  [INFO] Using hardcoded sample headlines as fallback")
-        all_headlines = _sample_headlines()
+        print("  ⚠  Live feeds unavailable — using sample headlines.\n")
+        return SAMPLE_HEADLINES
 
+    print(f"\n  →  {len(all_headlines)} recent headlines collected\n")
     return all_headlines
-
-
-if __name__ == "__main__":
-    news = fetch_news()
-    for item in news:
-        print(f"[{item['source']}] {item['headline']}")
